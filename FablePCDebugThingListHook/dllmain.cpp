@@ -257,7 +257,9 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
     if (!pThingMgr || IsBadReadPtr(pThingMgr, 4)) return pThis;
 
     for (const auto& cat : g_Categories) {
+
         g_FolderCacheCount = 0;
+
         SafeGameWString catName(cat.Name);
         int catHandle = fnAddEntry(pTree, catName.ptr(), cat.ID, 0, 0);
 
@@ -269,16 +271,10 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
         for (int j = 1; j < count; j++) {
             int gIndex = fnGetGlobalIndex(pDefMgr, className, j);
 
-            char smartPtrBuf[32] = { 0 };
-            ((void(__thiscall*)(void*, void*, void*, int))fnGetPDef)(pDefMgr, smartPtrBuf, className, j);
-            char* pDefObj = *(char**)smartPtrBuf;
-
             int groupID = 0;
-            if (pDefObj && !IsBadReadPtr(pDefObj, 0x50)) {
-                groupID = *(int*)(pDefObj + g_Offsets.GroupDef);
-            }
 
             wchar_t folderName[128] = L"General";
+
             if (groupID > 0) {
                 CDefString groupDefStr;
                 fnGetDefNameFromGlobalIndex(pDefMgr, &groupDefStr, groupID);
@@ -315,6 +311,7 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
 
     fnSortTree(pTree);
     fnUpdateTreeView(pTree);
+
     return pThis;
 }
 
