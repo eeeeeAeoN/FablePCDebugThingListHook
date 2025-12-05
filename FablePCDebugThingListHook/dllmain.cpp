@@ -1,11 +1,10 @@
 #include <windows.h>
-#include <vector>
-#include <string>
-#include <algorithm>
 #include "MinHook.h"
 
+// =============================================================
+// CONSTANTS & ENUMS
+// =============================================================
 #define IDA_BASE 0x00400000
-
 #define THRESHOLD_SMALL_EGO 16252928 
 #define THRESHOLD_LARGE_WIN 52428800
 
@@ -21,7 +20,6 @@ struct GameOffsets {
     ptrdiff_t CThingDialog_ThingManager;
     ptrdiff_t ControlCentre_Component;
     ptrdiff_t ControlCentre_DefMgr;
-    ptrdiff_t GroupDef;
 };
 
 struct GameAddresses {
@@ -46,7 +44,6 @@ struct GameAddresses {
 GameAddresses g_Addrs;
 GameOffsets g_Offsets;
 
-// Structs padded to largest known size (FableWin Debug) to prevent stack corruption
 struct CWideString {
     void* PStringData;
     const wchar_t* DebugString;
@@ -92,16 +89,13 @@ _SortTree fnSortTree = nullptr;
 _UpdateTreeView fnUpdateTreeView = nullptr;
 void* pGDefStringTable = nullptr;
 
-
 void InitAddresses(GameVersion version) {
     if (version == GameVersion::Debug_Log) {
-
         g_Offsets.PTreeControl = 0x14C;
         g_Offsets.CThingDialog_ControlCentre = 0x144;
         g_Offsets.CThingDialog_ThingManager = 0x148;
         g_Offsets.ControlCentre_DefMgr = 0x854;
         g_Offsets.ControlCentre_Component = 0;
-        g_Offsets.GroupDef = 0x4C;
 
         g_Addrs.CThingDialog_Ctor = 0x028F2E90;
         g_Addrs.GetDefNameFromGlobalIndex = 0x03062780;
@@ -121,13 +115,11 @@ void InitAddresses(GameVersion version) {
         g_Addrs.AddEntry = 0x0326E0A0;
     }
     else if (version == GameVersion::Debug_Ego) {
-
         g_Offsets.PTreeControl = 0x130;
         g_Offsets.CThingDialog_ControlCentre = 0;
         g_Offsets.CThingDialog_ThingManager = 0;
         g_Offsets.ControlCentre_Component = 0x83C;
         g_Offsets.ControlCentre_DefMgr = 0;
-        g_Offsets.GroupDef = 0x48;
 
         g_Addrs.CThingDialog_Ctor = 0x008B2410;
         g_Addrs.GetDefNameFromGlobalIndex = 0x00B04B10;
@@ -195,35 +187,15 @@ struct CategoryInfo { const wchar_t* Name; int ID; };
 
 CategoryInfo g_Categories[] = {
     { L"Creatures", 1 },
-    { L"Player Creatures", 2 },
     { L"Buildings", 3 },
     { L"Villages", 4 },
     { L"Objects", 5 },
-    //{ L"Sound Emitters", 6 },
     { L"Holy Sites", 7 },
-    //{ L"Noises", 8 },
     { L"Switches", 9 },
     { L"Other", 10 },
     { L"Markers", 11 },
     { L"Physical Switches", 12 }
 };
-
-struct FolderNode { int GroupIndex; int TreeHandle; };
-FolderNode g_FolderCache[500];
-int g_FolderCacheCount = 0;
-
-int GetFolderHandle(void* pTree, int groupID, const wchar_t* name, int parentHandle) {
-    for (int i = 0; i < g_FolderCacheCount; i++) {
-        if (g_FolderCache[i].GroupIndex == groupID) return g_FolderCache[i].TreeHandle;
-    }
-    SafeGameWString wsName(name);
-    int handle = fnAddEntry(pTree, wsName.ptr(), 0, parentHandle, 0);
-    if (g_FolderCacheCount < 500) {
-        g_FolderCache[g_FolderCacheCount] = { groupID, handle };
-        g_FolderCacheCount++;
-    }
-    return handle;
-}
 
 typedef void* (__thiscall* _CThingDialog_Ctor)(void* pThis, const char* name, void* cc, void* tm);
 _CThingDialog_Ctor Original_CThingDialog = nullptr;
@@ -240,10 +212,8 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
     if (g_Offsets.CThingDialog_ControlCentre != 0) {
         void* pControlCentre = *(void**)((char*)pThis + g_Offsets.CThingDialog_ControlCentre);
         pThingMgr = *(void**)((char*)pThis + g_Offsets.CThingDialog_ThingManager);
-
-        if (pControlCentre && !IsBadReadPtr(pControlCentre, 4)) {
+        if (pControlCentre && !IsBadReadPtr(pControlCentre, 4))
             pDefMgr = *(void**)((char*)pControlCentre + g_Offsets.ControlCentre_DefMgr);
-        }
     }
     else {
         pThingMgr = tm;
@@ -256,12 +226,13 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
     if (!pDefMgr || IsBadReadPtr(pDefMgr, 4)) return pThis;
     if (!pThingMgr || IsBadReadPtr(pThingMgr, 4)) return pThis;
 
+    SafeGameWString wsNone(L"None");
+
     for (const auto& cat : g_Categories) {
-
-        g_FolderCacheCount = 0;
-
         SafeGameWString catName(cat.Name);
         int catHandle = fnAddEntry(pTree, catName.ptr(), cat.ID, 0, 0);
+
+        int noneHandle = fnAddEntry(pTree, wsNone.ptr(), 0, catHandle, 0);
 
         void* className = fnGetClassName(pThingMgr, cat.ID);
         if (!className || IsBadReadPtr(className, 4)) continue;
@@ -269,49 +240,32 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
         int count = fnGetNoDefs(pDefMgr, className);
 
         for (int j = 1; j < count; j++) {
-            int gIndex = fnGetGlobalIndex(pDefMgr, className, j);
-
-            int groupID = 0;
-
-            wchar_t folderName[128] = L"General";
-
-            if (groupID > 0) {
-                CDefString groupDefStr;
-                fnGetDefNameFromGlobalIndex(pDefMgr, &groupDefStr, groupID);
-                CCharString groupCharName;
-                memset(&groupCharName, 0, sizeof(groupCharName));
-
-                fnGetString(pGDefStringTable, &groupCharName, groupDefStr.TablePos);
-
-                const char* pRawGroup = GetSafeAnsi(groupCharName.PStringData);
-                if (pRawGroup) MultiByteToWideChar(CP_ACP, 0, pRawGroup, -1, folderName, 128);
-                if (groupCharName.PStringData) fnDtorChar(&groupCharName);
-            }
-
-            int folderHandle = (wcscmp(folderName, L"General") == 0) ? catHandle : GetFolderHandle(pTree, groupID > 0 ? groupID : -1, folderName, catHandle);
 
             CDefString defStr;
             fnGetDefName(pDefMgr, &defStr, className, j);
             CCharString charName;
             memset(&charName, 0, sizeof(charName));
-
             fnGetString(pGDefStringTable, &charName, defStr.TablePos);
 
             const char* pRawAnsi = GetSafeAnsi(charName.PStringData);
-            if (pRawAnsi) {
-                wchar_t wBuf[256];
-                if (MultiByteToWideChar(CP_ACP, 0, pRawAnsi, -1, wBuf, 256) > 0) {
+
+            if (pRawAnsi && strchr(pRawAnsi, '_')) {
+
+                wchar_t wBuf[128];
+                if (MultiByteToWideChar(CP_ACP, 0, pRawAnsi, -1, wBuf, 128) > 0) {
                     SafeGameWString safeName(wBuf);
-                    fnAddEntry(pTree, safeName.ptr(), gIndex, folderHandle, 1);
+                    int gIndex = fnGetGlobalIndex(pDefMgr, className, j);
+
+                    fnAddEntry(pTree, safeName.ptr(), gIndex, noneHandle, 1);
                 }
             }
+
             if (charName.PStringData) fnDtorChar(&charName);
         }
     }
 
     fnSortTree(pTree);
     fnUpdateTreeView(pTree);
-
     return pThis;
 }
 
