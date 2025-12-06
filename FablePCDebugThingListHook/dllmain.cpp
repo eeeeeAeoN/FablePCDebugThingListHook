@@ -1,12 +1,19 @@
 #include <windows.h>
+#include <stdio.h> 
 #include "MinHook.h"
 
-// =============================================================
-// CONSTANTS & ENUMS
-// =============================================================
 #define IDA_BASE 0x00400000
 #define THRESHOLD_SMALL_EGO 16252928 
 #define THRESHOLD_LARGE_WIN 52428800
+
+#define ID_PARTICLE     19
+#define ID_CAMERA       20
+#define ID_NAV_SEED     21
+#define ID_ENTRANCE     24
+#define ID_EXIT         25
+
+#define CAT_TRACK_NODE  10
+#define CAT_TECHNICAL   15
 
 enum class GameVersion {
     Unknown_Retail,
@@ -32,7 +39,6 @@ struct GameAddresses {
     uintptr_t GetDefNameFromClassIndex;
     uintptr_t GetString;
     uintptr_t GetGlobalIndex;
-    uintptr_t GetPDef;
     uintptr_t CWideString_Ctor;
     uintptr_t CWideString_Dtor;
     uintptr_t CCharString_Dtor;
@@ -65,7 +71,6 @@ typedef void(__thiscall* _GetDefName)(void*, CDefString*, void*, int);
 typedef CDefString* (__thiscall* _GetDefNameFromGlobalIndex)(void*, CDefString*, int);
 typedef void(__thiscall* _GetString)(void*, CCharString*, int);
 typedef int(__thiscall* _GetGlobalIndex)(void*, void*, int);
-typedef void* (__thiscall* _GetPDef)(void*, void*, void*, int);
 typedef void(__thiscall* _CWideString_Ctor)(CWideString*, const wchar_t*);
 typedef void(__thiscall* _CWideString_Dtor)(CWideString*);
 typedef void(__thiscall* _CCharString_Dtor)(CCharString*);
@@ -80,7 +85,6 @@ _GetDefName fnGetDefName = nullptr;
 _GetDefNameFromGlobalIndex fnGetDefNameFromGlobalIndex = nullptr;
 _GetString fnGetString = nullptr;
 _GetGlobalIndex fnGetGlobalIndex = nullptr;
-_GetPDef fnGetPDef = nullptr;
 _CWideString_Ctor fnCtorWide = nullptr;
 _CWideString_Dtor fnDtorWide = nullptr;
 _CCharString_Dtor fnDtorChar = nullptr;
@@ -88,6 +92,12 @@ _AddEntry fnAddEntry = nullptr;
 _SortTree fnSortTree = nullptr;
 _UpdateTreeView fnUpdateTreeView = nullptr;
 void* pGDefStringTable = nullptr;
+
+intptr_t g_AddressDelta = 0;
+void* Rebase(uintptr_t idaAddress) {
+    if (idaAddress == 0) return nullptr;
+    return (void*)(idaAddress + g_AddressDelta);
+}
 
 void InitAddresses(GameVersion version) {
     if (version == GameVersion::Debug_Log) {
@@ -106,7 +116,6 @@ void InitAddresses(GameVersion version) {
         g_Addrs.GetDefNameFromClassIndex = 0x030627C0;
         g_Addrs.GetString = 0x02FCCF40;
         g_Addrs.GetGlobalIndex = 0x030622E0;
-        g_Addrs.GetPDef = 0x03061E20;
         g_Addrs.CWideString_Ctor = 0x02F65650;
         g_Addrs.CWideString_Dtor = 0x02F65630;
         g_Addrs.CCharString_Dtor = 0x02F60F80;
@@ -130,7 +139,6 @@ void InitAddresses(GameVersion version) {
         g_Addrs.GetDefNameFromClassIndex = 0x00B05330;
         g_Addrs.GetString = 0x00B28A90;
         g_Addrs.GetGlobalIndex = 0x00B05260;
-        g_Addrs.GetPDef = 0x00B05EA0;
         g_Addrs.CWideString_Ctor = 0x00B02C10;
         g_Addrs.CWideString_Dtor = 0x00B02740;
         g_Addrs.CCharString_Dtor = 0x00AFA3F0;
@@ -138,12 +146,6 @@ void InitAddresses(GameVersion version) {
         g_Addrs.UpdateTreeView = 0x00BB80C0;
         g_Addrs.AddEntry = 0x00BB8040;
     }
-}
-
-intptr_t g_AddressDelta = 0;
-void* Rebase(uintptr_t idaAddress) {
-    if (idaAddress == 0) return nullptr;
-    return (void*)(idaAddress + g_AddressDelta);
 }
 
 void SetupFunctionPointers() {
@@ -154,7 +156,6 @@ void SetupFunctionPointers() {
     fnGetDefNameFromGlobalIndex = (_GetDefNameFromGlobalIndex)Rebase(g_Addrs.GetDefNameFromGlobalIndex);
     fnGetString = (_GetString)Rebase(g_Addrs.GetString);
     fnGetGlobalIndex = (_GetGlobalIndex)Rebase(g_Addrs.GetGlobalIndex);
-    fnGetPDef = (_GetPDef)Rebase(g_Addrs.GetPDef);
     fnCtorWide = (_CWideString_Ctor)Rebase(g_Addrs.CWideString_Ctor);
     fnDtorWide = (_CWideString_Dtor)Rebase(g_Addrs.CWideString_Dtor);
     fnDtorChar = (_CCharString_Dtor)Rebase(g_Addrs.CCharString_Dtor);
@@ -183,6 +184,37 @@ const char* GetSafeAnsi(void* pStringData) {
     return nullptr;
 }
 
+bool ContainsIgnoreCase(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return false;
+    for (const char* h = haystack; *h; ++h) {
+        const char* h_iter = h;
+        const char* n_iter = needle;
+        while (*h_iter && *n_iter) {
+            char h_char = (*h_iter >= 'a' && *h_iter <= 'z') ? *h_iter - 32 : *h_iter;
+            char n_char = (*n_iter >= 'a' && *n_iter <= 'z') ? *n_iter - 32 : *n_iter;
+            if (h_char != n_char) break;
+            h_iter++;
+            n_iter++;
+        }
+        if (!*n_iter) return true;
+    }
+    return false;
+}
+
+int GetSpoofedDriverType(const char* name) {
+    if (!name) return 0;
+
+    if (ContainsIgnoreCase(name, "TRACK_NODE")) return CAT_TRACK_NODE;
+    if (ContainsIgnoreCase(name, "PARTICLE") || ContainsIgnoreCase(name, "EMITTER")) return ID_PARTICLE;
+    if (ContainsIgnoreCase(name, "CAMERA")) return ID_CAMERA;
+    if (ContainsIgnoreCase(name, "NAV") || ContainsIgnoreCase(name, "SEED")) return ID_NAV_SEED;
+    if (ContainsIgnoreCase(name, "ENTRANCE")) return ID_ENTRANCE;
+    if (ContainsIgnoreCase(name, "EXIT")) return ID_EXIT;
+    if (ContainsIgnoreCase(name, "INTERNAL") || ContainsIgnoreCase(name, "LIGHT")) return 0;
+
+    return 0;
+}
+
 struct CategoryInfo { const wchar_t* Name; int ID; };
 
 CategoryInfo g_Categories[] = {
@@ -192,7 +224,6 @@ CategoryInfo g_Categories[] = {
     { L"Objects", 5 },
     { L"Holy Sites", 7 },
     { L"Switches", 9 },
-    { L"Other", 10 },
     { L"Markers", 11 },
     { L"Physical Switches", 12 }
 };
@@ -231,7 +262,6 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
     for (const auto& cat : g_Categories) {
         SafeGameWString catName(cat.Name);
         int catHandle = fnAddEntry(pTree, catName.ptr(), cat.ID, 0, 0);
-
         int noneHandle = fnAddEntry(pTree, wsNone.ptr(), 0, catHandle, 0);
 
         void* className = fnGetClassName(pThingMgr, cat.ID);
@@ -240,7 +270,6 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
         int count = fnGetNoDefs(pDefMgr, className);
 
         for (int j = 1; j < count; j++) {
-
             CDefString defStr;
             fnGetDefName(pDefMgr, &defStr, className, j);
             CCharString charName;
@@ -250,16 +279,88 @@ void* __fastcall Detour_CThingDialog(void* pThis, void* edx, const char* name, v
             const char* pRawAnsi = GetSafeAnsi(charName.PStringData);
 
             if (pRawAnsi && strchr(pRawAnsi, '_')) {
-
                 wchar_t wBuf[128];
                 if (MultiByteToWideChar(CP_ACP, 0, pRawAnsi, -1, wBuf, 128) > 0) {
                     SafeGameWString safeName(wBuf);
                     int gIndex = fnGetGlobalIndex(pDefMgr, className, j);
-
                     fnAddEntry(pTree, safeName.ptr(), gIndex, noneHandle, 1);
                 }
             }
+            if (charName.PStringData) fnDtorChar(&charName);
+        }
+    }
 
+    SafeGameWString catNodeName(L"Track Nodes");
+    int hNodeCat = fnAddEntry(pTree, catNodeName.ptr(), CAT_TRACK_NODE, 0, 0);
+    SafeGameWString subNodeName(L"TRACK_NODES");
+    int hSubNode = fnAddEntry(pTree, subNodeName.ptr(), CAT_TRACK_NODE, hNodeCat, 0);
+
+    SafeGameWString catTechName(L"Others");
+    int hTechCat = fnAddEntry(pTree, catTechName.ptr(), CAT_TECHNICAL, 0, 0);
+
+    SafeGameWString nParticles(L"PARTICLE");
+    int hSubParticle = fnAddEntry(pTree, nParticles.ptr(), ID_PARTICLE, hTechCat, 0);
+
+    SafeGameWString nCameras(L"CAMERA");
+    int hSubCamera = fnAddEntry(pTree, nCameras.ptr(), ID_CAMERA, hTechCat, 0);
+
+    SafeGameWString nNav(L"NAVIGATION");
+    int hSubNav = fnAddEntry(pTree, nNav.ptr(), ID_NAV_SEED, hTechCat, 0);
+
+    SafeGameWString nEntrance(L"REGION_ENTRANCE");
+    int hSubEnt = fnAddEntry(pTree, nEntrance.ptr(), ID_ENTRANCE, hTechCat, 0);
+
+    SafeGameWString nExit(L"REGION_EXIT");
+    int hSubExit = fnAddEntry(pTree, nExit.ptr(), ID_EXIT, hTechCat, 0);
+
+    int targetClassIDs[] = { 15 };
+
+    for (int classID : targetClassIDs) {
+        void* className = fnGetClassName(pThingMgr, classID);
+        if (!className || IsBadReadPtr(className, 4)) continue;
+
+        int count = fnGetNoDefs(pDefMgr, className);
+
+        for (int j = 1; j < count; j++) {
+            CDefString defStr;
+            fnGetDefName(pDefMgr, &defStr, className, j);
+            CCharString charName;
+            memset(&charName, 0, sizeof(charName));
+            fnGetString(pGDefStringTable, &charName, defStr.TablePos);
+
+            const char* pRawAnsi = GetSafeAnsi(charName.PStringData);
+
+            if (pRawAnsi) {
+                int spoofedID = GetSpoofedDriverType(pRawAnsi);
+
+                if (spoofedID != 0) {
+                    wchar_t wBuf[128];
+                    if (MultiByteToWideChar(CP_ACP, 0, pRawAnsi, -1, wBuf, 128) > 0) {
+                        SafeGameWString safeName(wBuf);
+                        int gIndex = fnGetGlobalIndex(pDefMgr, className, j);
+
+                        int targetFolderHandle = 0;
+
+                        if (spoofedID == CAT_TRACK_NODE) {
+                            targetFolderHandle = hSubNode;
+                        }
+                        else {
+                            switch (spoofedID) {
+                            case ID_PARTICLE: targetFolderHandle = hSubParticle; break;
+                            case ID_CAMERA:   targetFolderHandle = hSubCamera; break;
+                            case ID_NAV_SEED: targetFolderHandle = hSubNav; break;
+                            case ID_ENTRANCE: targetFolderHandle = hSubEnt; break;
+                            case ID_EXIT:     targetFolderHandle = hSubExit; break;
+                            default: targetFolderHandle = 0; break;
+                            }
+                        }
+
+                        if (targetFolderHandle != 0) {
+                            fnAddEntry(pTree, safeName.ptr(), gIndex, targetFolderHandle, 1);
+                        }
+                    }
+                }
+            }
             if (charName.PStringData) fnDtorChar(&charName);
         }
     }
@@ -285,27 +386,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         CloseHandle(hFile);
 
         GameVersion version = GameVersion::Unknown_Retail;
-
-        if (size.QuadPart < THRESHOLD_SMALL_EGO) {
-            version = GameVersion::Debug_Ego;
-        }
-        else if (size.QuadPart > THRESHOLD_LARGE_WIN) {
-            version = GameVersion::Debug_Log;
-        }
-        else {
-            return TRUE;
-        }
+        if (size.QuadPart < THRESHOLD_SMALL_EGO) version = GameVersion::Debug_Ego;
+        else if (size.QuadPart > THRESHOLD_LARGE_WIN) version = GameVersion::Debug_Log;
+        else return TRUE;
 
         InitAddresses(version);
-
         if (g_Addrs.CThingDialog_Ctor == 0) return TRUE;
 
         g_AddressDelta = (intptr_t)GetModuleHandle(NULL) - IDA_BASE;
-        void* hookAddr = Rebase(g_Addrs.CThingDialog_Ctor);
-
         SetupFunctionPointers();
+
         MH_Initialize();
-        MH_CreateHook(hookAddr, &Detour_CThingDialog, reinterpret_cast<LPVOID*>(&Original_CThingDialog));
+        MH_CreateHook(Rebase(g_Addrs.CThingDialog_Ctor), &Detour_CThingDialog, reinterpret_cast<LPVOID*>(&Original_CThingDialog));
         MH_EnableHook(MH_ALL_HOOKS);
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
